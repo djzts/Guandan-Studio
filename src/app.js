@@ -1,0 +1,187 @@
+import {VERSION,SUITS,SYMBOLS,rankName,wild,sortCards,recognize,metrics,deal,advance,computer,beats,bombValue} from './engine.js';
+
+const $=s=>document.querySelector(s),root=$('#app'),modal=$('#modal');
+const storageKey='guandan-studio-v01';
+const defaults={lang:'zh',visible:[true,false,false,false],score:true,hints:'always',explain:true,explainPartner:true,explainOpponents:true,ascending:false,view:'rank',autoSelf:false,speed:1200};
+let prefs={...defaults},state,groups=[],locked=[],selected=new Set(),timeline=[],cursor=0,branches=[],undo=[],redo=[],suggestions=[],potential=null,flushMap={},hint=null,tab='analysis',submitted=false,timer=null,requestId=0,analysisBusy=true,revealed=false;
+const tr=(zh,en)=>prefs.lang==='zh'?zh:en;
+const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const names=()=>[tr('你','You'),tr('右方对手','Right opponent'),tr('对家','Partner'),tr('左方对手','Left opponent')];
+const types={single:['单张','Single'],pair:['对子','Pair'],triple:['三张','Triple'],fullHouse:['三带二','Full house'],straight:['顺子','Straight'],pairs:['三连对','Three pairs'],triples:['钢板','Two triples'],bomb:['炸弹','Bomb'],straightFlush:['同花顺','Straight flush'],jokerBomb:['四王炸','Four jokers']};
+const typeName=m=>m?tr(...types[m.type]):tr('不出','Pass');
+const profileName=p=>({balanced:tr('综合参考','Balanced'),speed:tr('减少手数','Efficient'),control:tr('保留控制','Control'),alternative:tr('另一种取舍','Alternative')})[p];
+const reasonText=r=>({manual:tr('玩家选择。','Player decision.'),noMove:tr('没有能压过当前牌型的合法组合。','No legal combination beats the current play.'),finish:tr('这手可以出完剩余手牌。','This play sheds the entire remaining hand.'),partner:tr('对家领出，暂时让牌，保留自己的控制。','Partner is ahead; pass to preserve control.'),saveBomb:tr('暂时保留炸弹，等待更有价值的机会。','Keep the bomb for a later opportunity.'),block:tr('对手剩牌较少，优先阻止继续走牌。','An opponent has few cards; prioritize blocking.'),shed:tr('优先走出一个完整组合，减少剩余手数。','Shed an intact group to reduce the remaining groups.'),respond:tr('选择可以跟上的组合；必要时拆开现有结构。','Respond with a legal group, breaking the arrangement if needed.')})[r]||'';
+const randomSeed=()=>Array.from(crypto.getRandomValues(new Uint32Array(2)),n=>n.toString(36)).join('').slice(0,10);
+function save(){try{if(timeline[cursor])timeline[cursor]={...structuredClone(state),studioArrangement:structuredClone(groups),studioLocks:[...locked]};localStorage.setItem(storageKey,JSON.stringify({prefs,state,groups,locked,timeline,cursor,branches:branches.slice(-3),revealed,submitted}));}catch{ /* Browser storage may be unavailable. */ }}
+function load(){
+  try{const x=JSON.parse(localStorage.getItem(storageKey));if(x?.state?.version===VERSION){prefs={...defaults,...x.prefs};state=x.state;groups=x.groups||[];locked=x.locked||[];timeline=x.timeline||[state];cursor=x.cursor||0;branches=x.branches||[];revealed=x.revealed||false;submitted=x.submitted||false;}}catch{}
+  const p=new URLSearchParams(location.hash.slice(1));
+  if(p.has('seed')){const seed=p.get('seed').slice(0,80),l=Number(p.get('level')),f=Number(p.get('first'));state=deal(seed,l>=2&&l<=14?l:undefined,f>=0&&f<=3?f:0);groups=[];locked=[];timeline=[structuredClone(state)];cursor=0;branches=[];revealed=false;}
+  if(!state){state=deal(randomSeed());timeline=[structuredClone(state)];}
+  if(prefs.visible.slice(1).some(Boolean))revealed=true;
+}
+load();
+const worker=new Worker(new URL('./analysis-worker.js',import.meta.url),{type:'module'});
+worker.onmessage=({data})=>{if(data.id!==requestId)return;analysisBusy=false;if(data.error){toast(tr('分析暂不可用，请重新发牌。','Analysis unavailable. Please deal again.'));return;}suggestions=data.suggestions;potential=data.potential;flushMap=data.flushes;render();};
+worker.onerror=()=>{analysisBusy=false;toast(tr('分析模块未能启动。请刷新页面。','Analysis could not start. Please reload.'));};
+function analyze(){analysisBusy=true;hint=null;flushMap={};suggestions=[];worker.postMessage({id:++requestId,cards:state.hands[0],level:state.level,locked:groups.filter(g=>locked.includes(g.key))});}
+function snapshotArrangement(){undo.push(structuredClone({groups,locked}));undo=undo.slice(-30);redo=[];}
+function completeGroups(){const used=new Set(groups.flatMap(g=>g.cards.map(c=>c.id)));return [...groups,...state.hands[0].filter(c=>!used.has(c.id)).flatMap(c=>recognize([c],state.level))];}
+function cleanGroups(){const ids=new Set(state.hands[0].map(c=>c.id));groups=groups.filter(g=>g.cards.every(c=>ids.has(c.id)));locked=locked.filter(k=>groups.some(g=>g.key===k));selected.clear();undo=[];redo=[];}
+function toast(text){$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('show'),3500);}
+function button(action,label,cls='',extra=''){return `<button type="button" data-action="${action}" class="${cls}" ${extra}>${label}</button>`;}
+function card(c,{mini=false,click=false,assigned=null}={}){
+  const isWild=wild(c,state.level),sel=selected.has(c.id),hi=hint?.cards.some(h=>h.id===c.id),red=c.suit==='H'||c.suit==='D'||c.rank===16;
+  const label=`${c.rank>=15?tr(c.rank===16?'大王':'小王',c.rank===16?'Red joker':'Black joker'):SYMBOLS[c.suit]+rankName(c.rank)}${isWild?' '+tr('配牌','wild card'):''}`;
+  const inside=`<span class="card-corner"><b>${c.rank>=15?'★':rankName(c.rank)}</b><span>${c.rank>=15?'J':SYMBOLS[c.suit]}</span></span><span class="card-pip">${c.rank>=15?'♛':SYMBOLS[c.suit]}</span>${isWild?`<i class="wild-badge">${tr('配','W')}</i>`:c.rank===state.level?`<i class="level-badge">${tr('级','L')}</i>`:''}${assigned?`<small class="assignment">→${SYMBOLS[assigned.suit]||''}${rankName(assigned.rank)}</small>`:''}`;
+  return click?`<button class="card ${mini?'mini':''} ${red?'red':''} ${sel?'selected':''} ${hi?'highlighted':''}" data-card="${c.id}" draggable="true" aria-label="${label}" aria-pressed="${sel}" title="${label}">${inside}</button>`:`<span class="card ${mini?'mini':''} ${red?'red':''}" aria-label="${label}">${inside}</span>`;
+}
+function seat(s){
+  const visible=prefs.visible[s],h=state.hands[s],acting=!state.ended&&state.turn===s;
+  return `<div class="seat seat-${s} ${acting?'acting':''}"><div class="seat-head"><span class="avatar ${s===2?'partner':''}">${s===2?'◇':s===1?'E':'W'}</span><div><strong>${names()[s]}</strong><small>${state.finished.includes(s)?tr('已出完','Finished'):`${h.length} ${tr('张牌','cards')}`}</small></div>${button('visibility',visible?'◉':'◎','eye',`data-seat="${s}" aria-label="${tr('切换手牌显示','Toggle hand visibility')}" title="${tr('切换手牌显示','Toggle hand visibility')}"`)}</div>${visible?`<div class="seat-cards">${sortCards(h,state.level).map(c=>card(c,{mini:true})).join('')}</div>`:`<div class="card-backs">${h.length?'<i></i><i></i><i></i><i></i><i></i>':''}</div>`}</div>`;
+}
+function hand(){
+  const cards=sortCards(state.hands[0],state.level,prefs.ascending);
+  if(prefs.view==='rank'){
+    const buckets=[];for(const c of cards){let g=buckets.find(g=>g[0].rank===c.rank);if(!g){g=[];buckets.push(g);}g.push(c);}
+    return `<div class="rank-hand">${buckets.map(g=>`<div class="rank-stack" style="--count:${g.length}">${g.map((c,i)=>`<div style="--i:${i}">${card(c,{click:true})}</div>`).join('')}</div>`).join('')}</div>`;
+  }
+  const used=new Set(groups.flatMap(g=>g.cards.map(c=>c.id)));
+  return `<div class="group-hand">${groups.map((g,i)=>`<section class="hand-group ${locked.includes(g.key)?'locked':''}"><div class="group-label"><span>${typeName(g)}</span>${button('lock',locked.includes(g.key)?'◆':'◇','icon',`data-index="${i}" aria-label="${tr('锁定或解锁','Lock or unlock')}"`)}${button('ungroup','×','icon',`data-index="${i}" aria-label="${tr('拆组','Dismantle group')}"`)}</div><div class="group-cards">${g.cards.map(c=>card(c,{click:true,assigned:g.assignments.find(a=>a.id===c.id)})).join('')}</div></section>`).join('')}<section class="ungrouped"><div class="group-label">${tr('待整理','Ungrouped')}</div><div class="loose-cards">${cards.filter(c=>!used.has(c.id)).map(c=>card(c,{click:true})).join('')||'<span class="empty-small">✓</span>'}</div></section></div>`;
+}
+function hints(){const allowed=prefs.hints==='always'||prefs.hints==='submit'&&submitted;return `<div class="flush-tools"><span>${tr('同花顺','Straight flush')}</span>${SUITS.map(s=>{const list=flushMap[s]||[];return button('flush',`${SYMBOLS[s]}${allowed&&list.length?`<sup>${list.length}</sup>`:''}`,`suit-button ${s==='H'||s==='D'?'red':''} ${allowed&&list.length?'available':''}`,`data-suit="${s}" ${!allowed||!list.length?'disabled':''} aria-label="${SYMBOLS[s]} ${tr('同花顺候选','straight flush candidates')}"`);}).join('')}<span class="hint-status">${!allowed?tr('提示已隐藏','Hints hidden'):analysisBusy?tr('寻找中…','Searching…'):tr('点击花色预览','Select a suit to preview')}</span></div>`;}
+function assessment(){
+  const m=metrics(completeGroups(),state.level),base=potential;
+  const level=base?.score>=65?tr('较强','Strong'):base?.score>=40?tr('均衡','Balanced'):tr('有待整合','Needs structure');
+  if(!prefs.score)return `<div class="analysis-empty"><span>◌</span><h3>${tr('先独立思考','Make your own plan')}</h3><p>${tr('评分已隐藏，提交后仍可在设置中打开。','Evaluation is hidden. Enable it in settings when ready.')}</p></div>`;
+  return `<div class="score-hero"><div><span class="eyebrow">${tr('理牌质量','ARRANGEMENT QUALITY')}</span><div class="score-number">${state.hands[0].length?m.score:'—'}<small>/ 100</small></div></div><div class="score-ring" style="--score:${m.score}%"><span>♧</span></div></div><p class="score-note">${tr('启发式参考分 · 不代表胜率','Heuristic reference · not a win probability')}</p><div class="metric-grid"><div><b>${m.groups}</b><span>${tr('出牌组数','Groups')}</span></div><div><b>${m.weak}</b><span>${tr('弱单张','Weak singles')}</span></div><div><b>${m.bombs}</b><span>${tr('炸弹组合','Bombs')}</span></div><div><b>${state.hands[0].filter(c=>wild(c,state.level)).length}</b><span>${tr('剩余配牌','Wild cards')}</span></div></div><div class="insight"><span class="insight-icon">↗</span><div><strong>${tr('手牌潜力','Hand potential')} · ${analysisBusy?'…':level}</strong><p>${m.weak?tr(`目前有 ${m.weak} 张弱单，尝试吸收到顺子或三带二中。`,`There are ${m.weak} weak singles. Look for straights or full houses.`):tr('散单负担较轻，接下来关注回手与组合衔接。','Few weak singles. Consider how to regain the lead.')}</p></div></div><div class="insight subtle"><span class="insight-icon">◇</span><div><strong>${tr('保留变化','Keep your options')}</strong><p>${tr(`当前组合使用 ${m.spent} 张配牌。比较即时收益与后续调整空间。`,`${m.spent} wild cards are committed to groups. Compare immediate gains with future flexibility.`)}</p></div></div><div class="section-label">${tr('参考方案','SUGGESTED ARRANGEMENTS')}<span>${tr('非穷尽搜索','Bounded search')}</span></div><div class="suggestions">${analysisBusy?`<p class="muted">${tr('正在分析你的手牌…','Analyzing your hand…')}</p>`:suggestions.map((s,i)=>`<button class="suggestion" data-action="suggest" data-index="${i}" ${!state.hands[0].length?'disabled':''}><span><strong>${profileName(s.profile)}</strong><small>${s.metrics.groups} ${tr('组','groups')} · ${s.metrics.bombs} ${tr('炸','bombs')} · ${s.metrics.weak} ${tr('弱单','weak singles')}</small></span><span class="suggestion-score">${s.metrics.score}<i>↗</i></span></button>`).join('')}</div><div class="position-note"><span class="live-dot"></span>${state.ended?tr('本局结束','Deal complete'):state.turn===0?tr('轮到你：可以重新理牌再行动','Your turn: rearrange before playing'):tr('观察公开出牌，等待下一次机会','Watch public play for your next opportunity')}<small>${tr('分析依据：自己的手牌与公开信息','Based on your hand and public information')}</small></div>`;
+}
+function historyPanel(){return `<div class="history-heading"><h3>${tr('出牌记录','Play history')}</h3><span>${cursor} / ${timeline.length-1}</span></div><p class="muted">${tr('点击任意一步回到当时；继续行动会保存原分支。','Select an action to revisit it. Continuing preserves the old branch.')}</p>${button('rewind',tr('↶ 回到开局','↶ Back to opening'),'text-button',`data-step="0"`)}<ol class="history-list">${timeline.slice(1).map((s,i)=>{const e=s.log.at(-1);return `<li class="${cursor===i+1?'current':''}"><button data-action="rewind" data-step="${i+1}"><span class="history-index">${i+1}</span><span><strong>${names()[e.seat]}</strong><small>${typeName(e.move)} ${e.move?e.move.cards.map(c=>`${SYMBOLS[c.suit]}${rankName(c.rank)}`).join(' '):''}</small>${e.move?.assignments.length?`<small>${tr('配牌','Wild')}: ${e.move.assignments.map(a=>`${SYMBOLS[a.suit]}${rankName(a.rank)}`).join(', ')}</small>`:''}</span></button></li>`;}).join('')||`<p class="muted">${tr('出牌后，记录会出现在这里。','Your first action will appear here.')}</p>`}</ol>${branches.length?`<div class="section-label">${tr('保存的分支','SAVED BRANCHES')}</div>${branches.map((b,i)=>button('branch',`${tr('尝试','Attempt')} ${i+1} · ${b.length-1} ${tr('步','actions')}`,'branch-button',`data-index="${i}"`)).join('')}`:''}`;}
+const lessons=[
+ ['减少手数，也看代价','Fewer groups, at what cost?','整理后手数越少，通常越容易走牌，但不要为少一手轻易放弃关键控制。','Fewer groups can make shedding easier, but retaining control may justify an extra group.'],
+ ['配牌留有变化','Keep wild cards flexible','红心级牌可补同花顺、炸弹和其他组合。预览多种用途，出牌前仍可拆组调整。','A heart-level card can complete a straight flush, bomb, or other group. Compare uses before committing.'],
+ ['组顺检查弱单','Check singles after making a straight','组顺拆散对子或三张时，检查是否留下难走的小单。残局能直接走完时，可以例外。','Check whether a straight breaks pairs or triples into weak singles. Finishing immediately may justify it.'],
+ ['同花顺与两炸','A straight flush or two bombs?','不要仅因提示器亮起就应用；比较拆炸的代价和重新拿回先手的机会。','A highlighted straight flush is not automatically best. Compare the lost bombs and opportunities to regain control.'],
+ ['主攻还是助攻','Attack or support','根据自己手牌和公开行动调整定位。队友牌强时，保留接应机会比抢出每一手更重要。','Adjust your role using your hand and public actions. Preserve support when your partner is well placed.'],
+ ['处理小单','Reduce weak singles','尝试将小单吸收到顺子或合法组合中，同时检查剩余结构。','Try absorbing weak singles into straights or other legal patterns, then inspect what remains.'],
+ ['理牌不组死','Rearrange as play develops','一个组合只是当前计划。出现新的接牌机会时，可以拆组重新搭配。','An arrangement is a plan. Break and rebuild groups when new opportunities arise.'],
+ ['出牌之后想回手','Plan to regain the lead','领出某类牌前，考虑自己或队友是否有机会重新控制牌权。','Before leading a pattern, consider how you or your partner might regain the lead.'],
+ ['炸后准备出什么','Plan the play after a bomb','用炸弹拿回先手前，先看下一手是否改善剩牌结构，或能帮助对家。','Before bombing, plan whether the next lead helps your structure or your partner.'],
+ ['张数只是线索','Card counts are clues','对手剩五张不等于一定是一手牌。结合已出牌和当前牌型判断。','Five cards left do not guarantee a finishing group. Consider the public history and active pattern.'],
+ ['让牌也有价值','Passing can help','队友当前领出时，不必为了减少自己的牌就立刻压过。紧急封堵与直接走完是例外。','Do not automatically overtake a partner. Urgent blocking or finishing can justify doing so.'],
+ ['记住配牌和王','Track wild cards and jokers','观察已出的配牌与王。某个自然点数出尽时，还要考虑配牌能否补缺。','Track played wild cards and jokers. A missing natural rank may still be supplied by a wild card.']
+];
+function learnPanel(){return `<div class="history-heading"><h3>${tr('理牌笔记','Arrangement notes')}</h3><span>12</span></div><p class="muted">${tr('经验提示有适用条件，不是每局必守的规则。','Contextual advice, not absolute rules.')}</p>${lessons.map((l,i)=>`<details class="lesson" ${i===1?'open':''}><summary><span>${String(i+1).padStart(2,'0')}</span>${tr(l[0],l[1])}</summary><p>${tr(l[2],l[3])}</p></details>`).join('')}<p class="source-note">${tr('根据用户提供的百条口诀整理，加入适用条件与例外。','Adapted from the supplied 100 maxims with conditions and exceptions.')} <a href="https://zhuanlan.zhihu.com/p/660084172" target="_blank" rel="noreferrer">${tr('原文','Source')} ↗</a></p>`;}
+function render(){
+  const focus=document.activeElement?.dataset?.action;
+  const scrolls=['.hand-scroll','.panel-body','.history-list'].map(s=>{const el=root.querySelector(s);return [s,el?.scrollLeft||0,el?.scrollTop||0];});
+  document.documentElement.lang=prefs.lang==='zh'?'zh-CN':'en';
+  const e=state.log.at(-1),target=state.lead?.move;
+  root.innerHTML=`<header class="topbar"><a class="brand" href="./"><span class="brand-mark">♧</span><div>Guandan <b>Studio</b><small>${tr('掼蛋研习室','THE HAND ARRANGEMENT LAB')}</small></div></a><nav><span class="version">V0.1 <span>LAB</span></span>${button('rules',tr('规则说明','Rules'),'nav-button')}${button('language',prefs.lang==='zh'?'EN / 中':'中 / EN','language-button')}${button('settings','⚙','settings-button',`aria-label="${tr('设置','Settings')}"`)}</nav></header>
+  <main><div class="page-heading"><div><div class="eyebrow">${tr('看懂每一种可能','SEE EVERY POSSIBILITY')}</div><h1>${tr('理好这一手。','Make sense of your hand.')}</h1><p>${tr('组合、比较、再思考。让每一手牌都有章可循。','Arrange. Compare. Reconsider. Find the reasoning behind every hand.')}</p></div><div class="heading-actions">${button('share',`↗ ${tr('分享牌局','Share deal')}`,'secondary')}${button('new',`＋ ${tr('发一副新牌','New deal')}`,'primary')}</div></div>
+  <div class="workspace"><div class="table-column"><section class="table" aria-label="${tr('四人牌桌','Four-player table')}"><div class="table-top"><span class="table-mode"><i></i>${prefs.visible.slice(1).every(Boolean)?tr('四明手练习','OPEN HANDS'):tr('独立练习','PRACTICE TABLE')}${revealed?' · '+tr('复盘','REVIEW'):''}</span><div class="level-chip">${tr('本局打','LEVEL')} <b>${rankName(state.level)}</b><span>♥${rankName(state.level)} ${tr('配','WILD')}</span></div></div>${seat(2)}${seat(3)}${seat(1)}<div class="table-center">${target?`<div class="center-caption">${names()[state.lead.seat]} · ${typeName(target)}</div><div class="played-cards">${target.cards.map(c=>card(c,{mini:true,assigned:target.assignments.find(a=>a.id===c.id)})).join('')}</div>`:`<div class="table-watermark">♧</div><div class="center-caption">${state.ended?tr('本局结束','DEAL COMPLETE'):tr('新的出牌轮次','A FRESH LEAD')}</div>`}${state.ended?`<strong class="turn-label">${state.finished[0]%2===0?tr('你与对家获胜','Your team wins'):tr('对手获胜','Opponents win')}</strong>`:`<span class="turn-label">${names()[state.turn]} · ${tr('行动','to play')}</span>`}</div><div class="table-bottom"><span>${tr('牌局','DEAL')} <b>${escape(state.seed)}</b></span><span>${tr('基础策略 · 电脑仅使用自己的手牌','Basic strategy · computers see their own cards only')}</span></div></section>
+  <div class="playback"><div class="playback-left">${button('restart','↶','icon-button',`title="${tr('重开同局','Restart deal')}" aria-label="${tr('重开同局','Restart deal')}"`)}${button('step',`▷ ${tr('下一步','Next action')}`,'secondary',state.ended?'disabled':'')}${button('toMe',tr('到我行动','Run to my turn'),'text-button',state.ended||state.turn===0?'disabled':'')}</div><div>${button('auto',timer?`Ⅱ ${tr('暂停','Pause')}`:`▶ ${tr('自动演示','Auto play')}`,'auto-button',state.ended?'disabled':'')}</div></div>
+  <section class="hand-panel"><div class="hand-heading"><div><span class="you-dot"></span><h2>${tr('你的手牌','Your hand')}</h2><span class="count-pill">${state.hands[0].length}</span></div><div class="segmented">${button('view',tr('点数排列','By rank'),prefs.view==='rank'?'active':'',`data-view="rank"`)}${button('view',tr('组合排列','By group'),prefs.view==='group'?'active':'',`data-view="group"`)}</div></div>${hints()}<div class="hand-scroll">${hand()}</div>${hint?`<div class="hint-preview"><span>${SYMBOLS[hint.suit]} ${tr('同花顺','Straight flush')} · ${hint.assignments.length} ${tr('张配牌','wild cards')} · ${hint.index+1}/${flushMap[hint.suit].length}</span>${button('applyHint',tr('应用组合','Apply group'),'small-primary')}${button('clearHint','×','icon',`aria-label="${tr('关闭预览','Close preview')}"`)}</div>`:''}<div class="hand-footer"><div class="arrange-actions">${button('group',tr('＋ 组成一组','＋ Group cards'),'secondary',!selected.size?'disabled':'')}${button('arrange',tr('自动理牌','Auto arrange'),'secondary',analysisBusy||!state.hands[0].length?'disabled':'')}${button('undo','↶','icon-button',`${!undo.length?'disabled':''} aria-label="${tr('撤销','Undo')}"`)}${button('redo','↷','icon-button',`${!redo.length?'disabled':''} aria-label="${tr('重做','Redo')}"`)}${button('sort','⇄','icon-button',`title="${tr('反转排序','Reverse order')}" aria-label="${tr('反转排序','Reverse order')}"`)}</div><div class="play-actions">${button('pass',tr('不出','Pass'),'secondary',state.turn!==0||!state.lead||state.ended?'disabled':'')}${button('play',tr('出牌','Play'),'primary',state.turn!==0||!selected.size||state.ended?'disabled':'')}${button('submit',tr('评价理牌 ↗','Evaluate ↗'),'gold-button',!state.hands[0].length?'disabled':'')}</div></div><p class="hand-help">${selected.size?tr(`已选 ${selected.size} 张 · 点击取消选择`,`${selected.size} selected · click to deselect`):tr('点选牌张组成一组，或拖动牌张到另一张牌上多选。红心级牌可灵活搭配。','Select cards to create a group, or drag onto another card to select both. Heart-level cards are wild.')}</p></section>
+  ${e&&prefs.explain?`<div class="coach-strip"><span>✧</span><div><strong>${names()[e.seat]} · ${typeName(e.move)}</strong><p>${reasonText(e.reason)}</p></div><span class="coach-label">${tr('公开信息解释','PUBLIC INFORMATION')}</span></div>`:''}</div>
+  <aside class="analysis-panel"><div class="panel-tabs">${['analysis','history','learn'].map((v,i)=>button('tab',[tr('分析','Analysis'),tr('记录','History'),tr('学习','Learn')][i],tab===v?'active':'',`data-tab="${v}"`)).join('')}</div><div class="panel-body">${tab==='analysis'?assessment():tab==='history'?historyPanel():learnPanel()}</div></aside></div><footer><span>♧ Guandan Studio <span class="footer-divider">/</span> ${tr('把每一种理法想明白','A little more thought in every hand.')}</span><a href="https://github.com/djzts/Guandan-Studio" target="_blank" rel="noreferrer">GitHub ↗</a></footer></main>`;
+  const coach=root.querySelector('.coach-strip');
+  if(coach && e){
+    if(e.seat===2&&!prefs.explainPartner || e.seat%2===1&&!prefs.explainOpponents)coach.remove();
+    else if(e.seat!==0&&!prefs.visible[e.seat]){
+      coach.querySelector('p').textContent=e.move?tr('已出牌，减少剩余张数；暗牌模式不展示其内部组牌理由。','Cards played, reducing the remaining count. Private grouping reasons stay hidden.'):tr('选择不出。仅凭此次行动，不能确定是否有可压牌。','Passed. This action alone does not establish whether a stronger play was available.');
+    }
+  }
+  const position=root.querySelector('.position-note');
+  if(position){
+    const danger=state.hands.some((h,s)=>s%2===1&&h.length>0&&h.length<=5);
+    const own=metrics(completeGroups(),state.level);
+    const favorable=state.lead?.seat%2===0&&own.groups<=3;
+    const label=state.ended?tr('本局结束','Deal complete'):danger?tr('当前局势 · 需防守','Current position · defend'):favorable?tr('当前局势 · 有利','Current position · favorable'):tr('当前局势 · 观察中','Current position · open');
+    const detail=danger?tr('有对手剩余不超过 5 张；结合已出牌判断，不要仅凭张数猜牌型。','An opponent has at most 5 cards. Use public history; counts alone do not identify a pattern.'):favorable?tr('己方当前持有牌权，你的剩余组合较少；留意对手回压。','Your team holds the lead and you have few groups left. Watch for opponents regaining control.'):tr('关注牌权和各家剩牌，等待明确机会。','Watch the lead and public card counts for an opportunity.');
+    position.innerHTML=`<span class="live-dot"></span><strong>${label}</strong><p>${detail}</p><small>${tr('分析依据：自己的手牌与公开信息','Based on your hand and public information')}</small>`;
+  }
+  for(const [selector,left,top] of scrolls){const el=root.querySelector(selector);if(el){el.scrollLeft=left;el.scrollTop=top;}}
+  if(focus)root.querySelector(`[data-action="${focus}"]`)?.focus({preventScroll:true});
+  save();
+}
+function showDialog(title,body){modal.innerHTML=`<div class="modal-head"><h2>${title}</h2>${button('close','×','icon-button',`aria-label="${tr('关闭','Close')}"`)}</div>${body}`;if(!modal.open)modal.showModal();}
+function newDialog(){showDialog(tr('开始一副新牌','Start a new deal'),`<form id="new-form"><label>${tr('级牌','Level rank')}<select name="level"><option value="0">${tr('随机 2–A','Random 2–A')}</option>${Array.from({length:13},(_,i)=>`<option value="${i+2}">${rankName(i+2)}</option>`).join('')}</select></label><label>${tr('首发座位','Opening seat')}<select name="first"><option value="random">${tr('随机','Random')}</option>${names().map((n,i)=>`<option value="${i}">${n}</option>`).join('')}</select></label><label>${tr('牌局编号（留空随机）','Deal seed (blank for random)')}<input name="seed" maxlength="80" placeholder="${tr('可重复练习同一副牌','Replay the same cards')}" autocomplete="off"></label><button class="primary modal-submit" type="submit">${tr('发牌，开始练习','Deal & practice')} →</button></form>`);}
+function settings(){showDialog(tr('练习设置','Practice settings'),`<div class="settings-content"><div class="section-label">${tr('手牌可见性','HAND VISIBILITY')}</div><div class="preset-buttons">${button('preset',tr('四明手','All hands'),'secondary',`data-preset="all"`)}${button('preset',tr('隐藏敌方','Hide opponents'),'secondary',`data-preset="partner"`)}${button('preset',tr('只看自己','Own hand only'),'secondary',`data-preset="own"`)}</div>${[2,3,1].map(s=>`<label class="toggle-row">${names()[s]}<input type="checkbox" data-pref="visible" data-seat="${s}" ${prefs.visible[s]?'checked':''}></label>`).join('')}<p class="muted">${tr('显示暗牌后，本局标记为复盘。电脑仍仅使用自己的牌。','Revealing hands marks this deal as review. Computers still see only their own cards.')}</p><div class="section-label">${tr('学习辅助','LEARNING AIDS')}</div>${[['score',tr('显示评分','Show evaluation')],['explain',tr('显示行动解释','Show action explanations')],['explainPartner',tr('显示队友解释','Show partner explanations')],['explainOpponents',tr('显示对手解释','Show opponent explanations')],['autoSelf',tr('自动代我出牌','Play my hand automatically')]].map(([k,l])=>`<label class="toggle-row">${l}<input type="checkbox" data-pref="${k}" ${prefs[k]?'checked':''}></label>`).join('')}<label>${tr('同花顺提示','Straight flush hints')}<select data-pref="hints"><option value="always" ${prefs.hints==='always'?'selected':''}>${tr('始终显示','Always available')}</option><option value="submit" ${prefs.hints==='submit'?'selected':''}>${tr('提交后显示','After evaluation')}</option><option value="off" ${prefs.hints==='off'?'selected':''}>${tr('关闭','Off')}</option></select></label><label>${tr('演示速度','Playback speed')}<select data-pref="speed">${[600,1200,2200].map((v,i)=>`<option value="${v}" ${prefs.speed===v?'selected':''}>${[tr('快','Fast'),tr('正常','Normal'),tr('慢','Slow')][i]}</option>`).join('')}</select></label>${button('rules',tr('规则与评分说明','Rules & evaluation'),'secondary')}${button('clearStorage',tr('清除浏览器保存的数据','Clear saved browser data'),'text-button danger')}</div>`);}
+function rules(){showDialog(tr('Studio 0.1 · 规则与评分','Studio 0.1 · Rules & evaluation'),`<div class="rules-content"><p>${tr('两副牌，四人各 27 张，对坐为队友。行动顺序：你 → 右对手 → 对家 → 左对手。','Two decks, 27 cards each, opposite seats partner. Order: you → right opponent → partner → left opponent.')}</p><h3>♥ ${tr('红心级牌是配牌','Heart-level cards are wild')}</h3><p>${tr('可与其他牌配成合法牌型，不能代替王。单出按级牌；两张配牌单独组成对子时按级牌对子。组合中会标明替代身份。','Use with other cards to form legal patterns, never as jokers. Alone, a wild is a level card; two wilds alone form a level pair. Assignments are shown in groups.')}</p><h3>${tr('牌型与大小','Patterns & order')}</h3><p>${tr('大王 > 小王 > 级牌 > A 至 2。普通牌须同牌型、同张数比较；三带二比较三张部分。王对子可作为三带二的对子。','Red joker > black joker > level rank > A through 2. Ordinary responses match type and size. Full houses compare triples; a natural joker pair may be the pair.')}</p><p>${tr('顺子和同花顺固定五张；三连对固定三对；钢板固定两个连续三张。级牌在连续牌型中按自然点数使用，A 可低或高，但不能绕接。','Straights and straight flushes have five cards; consecutive pairs have three pairs; consecutive triples have two triples. Level ranks use natural positions in sequences. Ace may be low or high, never wrap around.')}</p><p>${tr('四张炸 < 五张炸 < 同花顺 < 六张及以上炸 < 四王炸。同张数炸比点数，同花顺比自然顺序。','Four-card bomb < five-card bomb < straight flush < bombs of six or more < four jokers. Equal-size bombs compare rank; straight flushes compare natural sequence order.')}</p><h3>${tr('不出、接风与结束','Passing, lead transfer & finish')}</h3><p>${tr('领出时不能不出。其他仍在场的玩家全部不出后，最后出牌者重新领出；若其已出完，则对家接风。两名队友最先出完，或三人出完时结束。','A fresh leader cannot pass. Once all other active players pass, the last player leads again, or their partner inherits the lead if they are out. End when teammates finish first and second, or three players finish.')}</p><h3>${tr('如何理解评分','Reading the evaluation')}</h3><p>${tr('参考分 = 88 − 4×组数 − 5×弱单 + 5×控制组 + 3×炸弹 − 2×已用配牌 + 0.5×已出牌数，限制在 0–100。弱单为低于 K 的普通单牌；控制组为炸弹或 A 及以上的单、对、三张、三带二。此公式是透明的基础启发式，尚未以胜率校准，只比较同一手牌的不同理法。','Reference = 88 − 4×groups − 5×weak singles + 5×control groups + 3×bombs − 2×committed wilds + 0.5×cards shed, clamped to 0–100. Weak singles rank below K; control groups are bombs or A-and-higher singles, pairs, triples, or full houses. This transparent baseline is not calibrated to win rates; compare arrangements of the same hand.')}</p><p>${tr('自动理牌是有界启发式搜索；评分与建议仅使用你的手牌。对手暗牌不会参与决策。','Auto arrangement is a bounded heuristic. Evaluation uses only your hand; hidden opponents’ cards do not enter decisions.')}</p><a href="./RULES.md" target="_blank">${tr('完整规则与限制','Full rules and limitations')} ↗</a></div>`);}
+function stop(){clearTimeout(timer);timer=null;}
+function perform(move,reason){
+  try{
+    if(cursor<timeline.length-1){branches.push(structuredClone(timeline));timeline=timeline.slice(0,cursor+1);}
+    const prev=state.hands[0].length;
+    state=advance(state,move,reason);timeline.push(structuredClone(state));cursor=timeline.length-1;selected.clear();
+    if(prev!==state.hands[0].length){cleanGroups();analyze();}
+    if(state.ended)stop();render();
+  }catch{toast(tr('这手不符合当前牌型或大小，请重新选择。','That play is not legal against the current pattern.'));}
+}
+function autoStep(){const choice=computer(state,groups);perform(choice.move,choice.reason);}
+function startLoop(toMe=false){
+  stop();const tick=()=>{if(state.ended||((toMe||!prefs.autoSelf)&&state.turn===0)){stop();render();return;}autoStep();if(!state.ended){timer=setTimeout(tick,toMe?180:Number(prefs.speed));render();}};
+  timer=setTimeout(tick,150);render();
+}
+function chooseSelected(forPlay=false){
+  let opts=recognize(state.hands[0].filter(c=>selected.has(c.id)),state.level);
+  if(forPlay)opts=opts.filter(m=>beats(m,state.lead?.move,state.level));
+  if(!opts.length){toast(tr('这些牌无法组成当前可用的合法牌型。','These cards do not form a legal pattern for this action.'));return;}
+  const apply=m=>{if(forPlay){stop();perform(m,'manual');}else applyGroup(m);};
+  if(opts.length===1){apply(opts[0]);return;}
+  showDialog(tr('选择牌型与配牌用途','Choose a pattern & wild-card assignment'),`<div class="move-options">${opts.map((m,i)=>`<button class="suggestion" data-action="chooseMove" data-index="${i}"><span><strong>${typeName(m)} · ${rankName(m.rank)}</strong><small>${m.assignments.map(a=>`${tr('配','Wild')} → ${SYMBOLS[a.suit]}${rankName(a.rank)}`).join(' / ')}</small></span><span>→</span></button>`).join('')}</div>`);
+  modal.choose=i=>{modal.close();apply(opts[i]);};
+}
+function applyGroup(m,confirmed=false){
+  const ids=new Set(m.cards.map(c=>c.id));
+  const overlaps=groups.filter(g=>g.cards.some(c=>ids.has(c.id)));
+  if(!confirmed&&overlaps.some(g=>locked.includes(g.key))){showDialog(tr('此操作需要拆开锁定组合','This changes a locked group'),`<p>${tr('继续会解锁并拆开涉及的组合。','Continuing unlocks and dismantles the overlapping groups.')}</p>${button('confirmGroup',tr('继续应用','Apply anyway'),'primary')}`);modal.confirmGroup=()=>{modal.close();applyGroup(m,true);};return;}
+  snapshotArrangement();groups=groups.filter(g=>!overlaps.includes(g));locked=locked.filter(k=>groups.some(g=>g.key===k));groups.push(m);selected.clear();prefs.view='group';hint=null;analyze();render();
+}
+function applySuggestion(index){const s=suggestions[index];if(!s)return;snapshotArrangement();groups=structuredClone(s.groups);prefs.view='group';selected.clear();hint=null;render();toast(tr('参考方案已应用，可继续修改。','Suggestion applied. You can keep adjusting it.'));}
+async function action(el){
+  const a=el.dataset.action;
+  if(a==='close'){modal.close();return;}
+  if(a==='new'){stop();newDialog();return;}
+  if(a==='settings'){settings();return;}
+  if(a==='rules'){rules();return;}
+  if(a==='chooseMove'){modal.choose(Number(el.dataset.index));return;}
+  if(a==='confirmGroup'){modal.confirmGroup();return;}
+  if(a==='language'){prefs.lang=prefs.lang==='zh'?'en':'zh';render();return;}
+  if(a==='view'){prefs.view=el.dataset.view;render();return;}
+  if(a==='tab'){tab=el.dataset.tab;render();return;}
+  if(a==='visibility'){const s=Number(el.dataset.seat);prefs.visible[s]=!prefs.visible[s];if(prefs.visible[s])revealed=true;render();return;}
+  if(a==='preset'){prefs.visible=el.dataset.preset==='all'?[true,true,true,true]:el.dataset.preset==='partner'?[true,false,true,false]:[true,false,false,false];if(prefs.visible.slice(1).some(Boolean))revealed=true;settings();render();return;}
+  if(a==='sort'){prefs.ascending=!prefs.ascending;render();return;}
+  if(a==='group'){chooseSelected();return;}
+  if(a==='play'){chooseSelected(true);return;}
+  if(a==='pass'){stop();perform(null,'manual');return;}
+  if(a==='step'){stop();if(state.turn===0&&!prefs.autoSelf){toast(tr('轮到你了。请选牌出牌，或在设置中打开自动代打。','Your turn. Select cards, or enable automatic play in settings.'));return;}autoStep();return;}
+  if(a==='toMe'){startLoop(true);return;}
+  if(a==='auto'){if(timer){stop();render();}else if(state.turn===0&&!prefs.autoSelf){toast(tr('自动演示会在你行动时暂停；可在设置中开启自动代打。','Auto play pauses at your turn. Enable automatic play for your seat in settings.'));}else startLoop();return;}
+  if(a==='arrange'){applySuggestion(0);return;}
+  if(a==='suggest'){applySuggestion(Number(el.dataset.index));return;}
+  if(a==='submit'){submitted=true;tab='analysis';render();toast(tr('已评价当前理牌。参考分不代表胜率。','Arrangement evaluated. The score is not a win probability.'));return;}
+  if(a==='lock'){const k=groups[Number(el.dataset.index)].key;snapshotArrangement();locked=locked.includes(k)?locked.filter(x=>x!==k):[...locked,k];analyze();render();return;}
+  if(a==='ungroup'){snapshotArrangement();const [g]=groups.splice(Number(el.dataset.index),1);locked=locked.filter(k=>k!==g.key);analyze();render();return;}
+  if(a==='undo'||a==='redo'){const from=a==='undo'?undo:redo,to=a==='undo'?redo:undo;if(!from.length)return;to.push(structuredClone({groups,locked}));({groups,locked}=from.pop());selected.clear();analyze();render();return;}
+  if(a==='flush'){const list=flushMap[el.dataset.suit];if(!list?.length)return;const i=hint?.suit===el.dataset.suit?(hint.index+1)%list.length:0;hint={...list[i],index:i};render();return;}
+  if(a==='clearHint'){hint=null;render();return;}
+  if(a==='applyHint'){if(hint)applyGroup(hint);return;}
+  if(a==='rewind'){stop();cursor=Number(el.dataset.step);state=structuredClone(timeline[cursor]);groups=state.studioArrangement||[];locked=state.studioLocks||[];delete state.studioArrangement;delete state.studioLocks;cleanGroups();analyze();render();return;}
+  if(a==='branch'){stop();const i=Number(el.dataset.index),b=branches[i];branches[i]=timeline;timeline=b;cursor=b.length-1;state=structuredClone(b[cursor]);groups=state.studioArrangement||[];locked=state.studioLocks||[];delete state.studioArrangement;delete state.studioLocks;cleanGroups();analyze();render();return;}
+  if(a==='restart'){stop();branches.push(structuredClone(timeline));state=deal(state.seed,state.level,state.first);groups=[];locked=[];timeline=[structuredClone(state)];cursor=0;submitted=false;cleanGroups();analyze();render();return;}
+  if(a==='share'){const url=new URL(location.href);url.hash=new URLSearchParams({seed:state.seed,level:state.level,first:state.first,v:VERSION}).toString();try{await navigator.clipboard.writeText(url.href);toast(tr('牌局链接已复制。分享的是初始牌局。','Deal link copied. It shares the opening deal.'));}catch{showDialog(tr('分享初始牌局','Share opening deal'),`<input readonly value="${escape(url.href)}" aria-label="${tr('牌局链接','Deal link')}">`);}return;}
+  if(a==='clearStorage'){try{localStorage.removeItem(storageKey);toast(tr('已清除保存数据；后续操作会重新保存。','Saved data cleared. Future actions will save again.'));}catch{}return;}
+}
+document.addEventListener('click',e=>{const c=e.target.closest('[data-card]');if(c){const id=c.dataset.card;selected.has(id)?selected.delete(id):selected.add(id);render();return;}const b=e.target.closest('[data-action]');if(b&&!b.disabled)action(b);});
+document.addEventListener('change',e=>{const k=e.target.dataset.pref;if(!k)return;if(k==='visible'){prefs.visible[Number(e.target.dataset.seat)]=e.target.checked;if(e.target.checked)revealed=true;}else prefs[k]=e.target.type==='checkbox'?e.target.checked:e.target.value;if(k==='hints')hint=null;render();});
+document.addEventListener('submit',e=>{if(e.target.id!=='new-form')return;e.preventDefault();const f=new FormData(e.target),seed=String(f.get('seed')).trim()||randomSeed(),first=f.get('first')==='random'?crypto.getRandomValues(new Uint32Array(1))[0]%4:Number(f.get('first'));state=deal(seed,Number(f.get('level')),first);groups=[];locked=[];timeline=[structuredClone(state)];cursor=0;branches=[];submitted=false;revealed=prefs.visible.slice(1).some(Boolean);cleanGroups();history.replaceState(null,'',location.pathname+location.search);modal.close();analyze();render();});
+let dragged=null;
+document.addEventListener('dragstart',e=>{const c=e.target.closest('[data-card]');if(c){dragged=c.dataset.card;e.dataTransfer.setData('text/plain',dragged);}});
+document.addEventListener('dragover',e=>{if(e.target.closest('[data-card]'))e.preventDefault();});
+document.addEventListener('drop',e=>{const c=e.target.closest('[data-card]');if(c&&dragged){e.preventDefault();selected.add(dragged);selected.add(c.dataset.card);dragged=null;render();}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){selected.clear();hint=null;stop();render();}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){stop();render();}});
+window.addEventListener('beforeunload',save);
+analyze();render();
