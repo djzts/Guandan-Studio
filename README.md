@@ -32,8 +32,11 @@ The static build goes to `dist/`. GitHub Actions tests and deploys pushes to `ma
 
 ## Documentation / 文档
 
+- [V0.2 release notes / 版本说明](V0.2-RELEASE.md)
+- [GitHub Release v0.2.0](https://github.com/djzts/Guandan-Studio/releases/tag/v0.2.0)
+
 - [规则与限制 / Rules and limitations](RULES.md)
 - [V0.1 中文方案](V0.1-PLAN.zh-CN.md)
 - [V0.1 English plan](V0.1-PLAN.en.md)
 
-This is a V0.1 practice tool. Scores are heuristic references, not calibrated win probabilities. Computer play is a basic deterministic policy, and arrangement suggestions are not exhaustive optima. Local persistence is limited to the current browser. Full-match leveling and tribute are outside this release.
+This is a V0.2 practice tool. Scores are heuristic references, not calibrated win probabilities. Computer play is a basic deterministic policy, and arrangement suggestions are not exhaustive optima. Local persistence is limited to the current browser. Full-match leveling and tribute are outside this release.

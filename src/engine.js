@@ -1,3 +1,5 @@
+export const APP_VERSION = '0.2';
+// Saved-deal schema is unchanged; keep existing browser sessions compatible.
 export const VERSION = 'studio-0.1';
 export const SUITS = ['S','H','C','D'];
 export const SYMBOLS = {S:'♠',H:'♥',C:'♣',D:'♦',J:'★'};

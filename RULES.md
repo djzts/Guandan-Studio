@@ -1,8 +1,8 @@
-# Studio 0.1 rules / 规则
+# Studio 0.2 rules / 规则
 
-This is the explicit practice ruleset implemented by Guandan Studio, not a claim of tournament certification. Independent deals only; tribute and leveling are outside V0.1.
+This is the explicit practice ruleset implemented by Guandan Studio, not a claim of tournament certification. Independent deals only; tribute and leveling are outside V0.2.
 
-本页定义网站实际采用的练习规则；不代表赛事认证。V0.1 为独立单局，不含进还贡和升级赛程。
+本页定义网站实际采用的练习规则；不代表赛事认证。V0.2 为独立单局，不含进还贡和升级赛程。
 
 ## Cards / 牌张
 
