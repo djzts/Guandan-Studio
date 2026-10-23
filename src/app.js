@@ -1,4 +1,5 @@
 import {VERSION,SUITS,SYMBOLS,rankName,wild,sortCards,recognize,metrics,deal,advance,computer,beats,bombValue} from './engine.js';
+import {rankStacks,arrangementSections} from './hand-layout.js';
 
 const $=s=>document.querySelector(s),root=$('#app'),modal=$('#modal');
 const storageKey='guandan-studio-v01';
@@ -40,14 +41,14 @@ function seat(s){
   const visible=prefs.visible[s],h=state.hands[s],acting=!state.ended&&state.turn===s;
   return `<div class="seat seat-${s} ${acting?'acting':''}"><div class="seat-head"><span class="avatar ${s===2?'partner':''}">${s===2?'◇':s===1?'E':'W'}</span><div><strong>${names()[s]}</strong><small>${state.finished.includes(s)?tr('已出完','Finished'):`${h.length} ${tr('张牌','cards')}`}</small></div>${button('visibility',visible?'◉':'◎','eye',`data-seat="${s}" aria-label="${tr('切换手牌显示','Toggle hand visibility')}" title="${tr('切换手牌显示','Toggle hand visibility')}"`)}</div>${visible?`<div class="seat-cards">${sortCards(h,state.level).map(c=>card(c,{mini:true})).join('')}</div>`:`<div class="card-backs">${h.length?'<i></i><i></i><i></i><i></i><i></i>':''}</div>`}</div>`;
 }
+function stackedHand(cards, assignments=[]){
+  return `<div class="rank-hand">${rankStacks(cards,selected).map(stack=>`<div class="rank-stack" style="--stack-extra:${stack.extraHeight}px">${stack.slots.map(({card:c,offset,layer})=>`<div class="stack-slot" style="--offset:${offset}px;--layer:${layer}">${card(c,{click:true,assigned:assignments.find(a=>a.id===c.id)})}</div>`).join('')}</div>`).join('')}</div>`;
+}
 function hand(){
   const cards=sortCards(state.hands[0],state.level,prefs.ascending);
-  if(prefs.view==='rank'){
-    const buckets=[];for(const c of cards){let g=buckets.find(g=>g[0].rank===c.rank);if(!g){g=[];buckets.push(g);}g.push(c);}
-    return `<div class="rank-hand">${buckets.map(g=>`<div class="rank-stack" style="--count:${g.length}">${g.map((c,i)=>`<div style="--i:${i}">${card(c,{click:true})}</div>`).join('')}</div>`).join('')}</div>`;
-  }
-  const used=new Set(groups.flatMap(g=>g.cards.map(c=>c.id)));
-  return `<div class="group-hand">${groups.map((g,i)=>`<section class="hand-group ${locked.includes(g.key)?'locked':''}"><div class="group-label"><span>${typeName(g)}</span>${button('lock',locked.includes(g.key)?'◆':'◇','icon',`data-index="${i}" aria-label="${tr('锁定或解锁','Lock or unlock')}"`)}${button('ungroup','×','icon',`data-index="${i}" aria-label="${tr('拆组','Dismantle group')}"`)}</div><div class="group-cards">${g.cards.map(c=>card(c,{click:true,assigned:g.assignments.find(a=>a.id===c.id)})).join('')}</div></section>`).join('')}<section class="ungrouped"><div class="group-label">${tr('待整理','Ungrouped')}</div><div class="loose-cards">${cards.filter(c=>!used.has(c.id)).map(c=>card(c,{click:true})).join('')||'<span class="empty-small">✓</span>'}</div></section></div>`;
+  if(prefs.view==='rank')return stackedHand(cards);
+  const {grouped,remaining}=arrangementSections(cards,groups,locked);
+  return `<div class="group-hand">${grouped.map(({group:g,index:i})=>`<section class="hand-group ${locked.includes(g.key)?'locked':''}"><div class="group-label"><span>${typeName(g)}</span>${button('lock',locked.includes(g.key)?'◆':'◇','icon',`data-index="${i}" aria-label="${tr('锁定或解锁','Lock or unlock')}"`)}${button('ungroup','×','icon',`data-index="${i}" aria-label="${tr('拆组','Dismantle group')}"`)}</div>${stackedHand(g.cards,g.assignments)}</section>`).join('')}<section class="ungrouped"><div class="group-label">${tr('剩余手牌 · 可继续组牌','Remaining cards · keep grouping')} <span class="remaining-count">${remaining.length}</span></div>${remaining.length?stackedHand(remaining):`<span class="empty-small">${tr('全部已组好','All cards grouped')} ✓</span>`}</section></div>`;
 }
 function hints(){const allowed=prefs.hints==='always'||prefs.hints==='submit'&&submitted;return `<div class="flush-tools"><span>${tr('同花顺','Straight flush')}</span>${SUITS.map(s=>{const list=flushMap[s]||[];return button('flush',`${SYMBOLS[s]}${allowed&&list.length?`<sup>${list.length}</sup>`:''}`,`suit-button ${s==='H'||s==='D'?'red':''} ${allowed&&list.length?'available':''}`,`data-suit="${s}" ${!allowed||!list.length?'disabled':''} aria-label="${SYMBOLS[s]} ${tr('同花顺候选','straight flush candidates')}"`);}).join('')}<span class="hint-status">${!allowed?tr('提示已隐藏','Hints hidden'):analysisBusy?tr('寻找中…','Searching…'):tr('点击花色预览','Select a suit to preview')}</span></div>`;}
 function assessment(){
